@@ -1,9 +1,14 @@
 import { useEffect, useRef } from 'react'
 
-const WS_URL = import.meta.env.VITE_COMPOSER_WS_URL ?? 'ws://localhost:8002/ws'
-const STANDARD_VIDEO_URL = import.meta.env.VITE_STANDARD_VIDEO_URL ?? 'http://localhost:8002/assets/standard.mp4'
-const FALLBACK_VIDEO_PATH = import.meta.env.VITE_FALLBACK_VIDEO_PATH ?? ''
 const MAX_RETRY_ATTEMPTS = 5
+
+function getEnv() {
+  return {
+    WS_URL: import.meta.env.VITE_COMPOSER_WS_URL ?? 'ws://localhost:8002/ws',
+    STANDARD_VIDEO_URL: import.meta.env.VITE_STANDARD_VIDEO_URL ?? 'http://localhost:8002/assets/standard.mp4',
+    FALLBACK_VIDEO_PATH: import.meta.env.VITE_FALLBACK_VIDEO_PATH ?? '',
+  }
+}
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -26,6 +31,7 @@ export default function App() {
   }
 
   const startFallback = () => {
+    const { FALLBACK_VIDEO_PATH } = getEnv()
     if (FALLBACK_VIDEO_PATH && !inFallback.current) {
       inFallback.current = true
       playVideo(`file://${FALLBACK_VIDEO_PATH}`, true)
@@ -33,6 +39,7 @@ export default function App() {
   }
 
   const connect = () => {
+    const { WS_URL, STANDARD_VIDEO_URL } = getEnv()
     const ws = new WebSocket(WS_URL)
     wsRef.current = ws
 
@@ -64,12 +71,14 @@ export default function App() {
   }
 
   const handleEnded = () => {
+    const { STANDARD_VIDEO_URL } = getEnv()
     if (!inFallback.current) {
       playVideo(STANDARD_VIDEO_URL, true)
     }
   }
 
   useEffect(() => {
+    const { STANDARD_VIDEO_URL } = getEnv()
     playVideo(STANDARD_VIDEO_URL, true)
     connect()
     return () => wsRef.current?.close()
