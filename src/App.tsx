@@ -16,6 +16,7 @@ export default function App() {
   const retryCount = useRef(0)
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const intentionalClose = useRef(false)
 
   const playVideo = (url: string, loop: boolean = false) => {
     const video = videoRef.current
@@ -25,7 +26,7 @@ export default function App() {
       video.src = url
       video.loop = loop
       video.load()
-      video.play().catch(() => {})
+      video.play().catch((err) => console.warn('kiosk video.play() rejected:', err))
       video.style.opacity = '1'
     }, 500)
   }
@@ -60,6 +61,10 @@ export default function App() {
     }
 
     ws.onclose = () => {
+      // Don't reconnect when we closed on purpose (e.g. component unmount /
+      // React StrictMode remount) — that spawned overlapping sockets and a
+      // reconnect storm that could miss broadcasts.
+      if (intentionalClose.current) return
       retryCount.current += 1
       if (retryCount.current >= MAX_RETRY_ATTEMPTS) {
         startFallback()
@@ -78,10 +83,14 @@ export default function App() {
   }
 
   useEffect(() => {
+    intentionalClose.current = false
     const { STANDARD_VIDEO_URL } = getEnv()
     playVideo(STANDARD_VIDEO_URL, true)
     connect()
-    return () => wsRef.current?.close()
+    return () => {
+      intentionalClose.current = true
+      wsRef.current?.close()
+    }
   }, [])
 
   return (

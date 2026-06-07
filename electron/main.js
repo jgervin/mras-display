@@ -8,6 +8,9 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      // Kiosk/signage: allow personalized clips (which carry TTS audio) to
+      // autoplay without a user gesture.
+      autoplayPolicy: 'no-user-gesture-required',
     },
   })
   if (process.env.NODE_ENV === 'development') {
