@@ -109,3 +109,33 @@ describe('WebSocket reconnect backoff', () => {
     expect(video.src).toContain('standard.mp4')
   })
 })
+
+describe('connection lifecycle', () => {
+  it('does not reconnect after the component unmounts (intentional close)', async () => {
+    vi.useFakeTimers()
+    const { unmount } = render(<App />)
+    expect(MockWebSocket).toHaveBeenCalledTimes(1)
+
+    // A real WebSocket fires onclose when closed; the unmount cleanup closes it.
+    mockWS.close.mockImplementation(() => mockWS.onclose?.())
+    unmount()
+    await act(async () => { vi.advanceTimersByTime(5000) })
+
+    expect(MockWebSocket).toHaveBeenCalledTimes(1) // no reconnect spawned by the cleanup close
+  })
+
+  it('plays the personalized clip on a play message', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    const video = container.querySelector('video')!
+
+    await act(async () => { mockWS.simulateOpen() })
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://localhost:8002/media/abc.mp4' })
+    })
+    await act(async () => { vi.advanceTimersByTime(600) })
+
+    expect(video.src).toContain('/media/abc.mp4')
+    expect(video.loop).toBe(false)
+  })
+})
