@@ -1,6 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type SyntheticEvent } from 'react'
 
 const MAX_RETRY_ATTEMPTS = 5
+const FADE_MS = 500       // crossfade duration (matches the CSS opacity transition)
+const VOLUME_STEPS = 10   // audio ramp granularity over FADE_MS
 
 function getEnv() {
   return {
@@ -11,33 +13,79 @@ function getEnv() {
   }
 }
 
+const videoStyle = (opacity: number) => ({
+  position: 'absolute' as const,
+  inset: 0,
+  width: '100%',
+  height: '100%',
+  objectFit: 'cover' as const,
+  opacity,
+  transition: `opacity ${FADE_MS}ms`,
+})
+
 export default function App() {
-  const videoRef = useRef<HTMLVideoElement>(null)
+  // Two stacked <video> elements that crossfade. `frontIdx` is the visible one.
+  const videoARef = useRef<HTMLVideoElement>(null)
+  const videoBRef = useRef<HTMLVideoElement>(null)
+  const frontIdx = useRef<0 | 1>(0)
+  const transition = useRef<{ timer?: ReturnType<typeof setTimeout>; ramp?: ReturnType<typeof setInterval> }>({})
+
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
-  const pendingPlay = useRef<ReturnType<typeof setTimeout>>()
   // Idle-ad rotation: sequential playlist, replaced by the composer /playlist
   // response (drop a .mp4 into assets/ to add one). Starts as the single default.
   const playlist = useRef<string[]>([getEnv().STANDARD_VIDEO_URL])
   const idleIndex = useRef(0)
 
+  const frontEl = () => (frontIdx.current === 0 ? videoARef.current : videoBRef.current)
+
+  const cancelTransition = () => {
+    if (transition.current.timer) { clearTimeout(transition.current.timer); transition.current.timer = undefined }
+    if (transition.current.ramp) { clearInterval(transition.current.ramp); transition.current.ramp = undefined }
+  }
+
+  // Ramp the old element's audio down and the new element's up over FADE_MS.
+  const rampVolume = (front: HTMLVideoElement, back: HTMLVideoElement) => {
+    let i = 0
+    transition.current.ramp = setInterval(() => {
+      i += 1
+      const t = i / VOLUME_STEPS
+      front.volume = Math.max(0, 1 - t)
+      back.volume = Math.min(1, t)
+      if (i >= VOLUME_STEPS) { clearInterval(transition.current.ramp); transition.current.ramp = undefined }
+    }, FADE_MS / VOLUME_STEPS)
+  }
+
+  // Crossfade: fade `back` (already loaded + playing) in while `front` fades out.
+  const startFade = (front: HTMLVideoElement, back: HTMLVideoElement) => {
+    cancelTransition()
+    console.log('[kiosk] playing', back.src)
+    back.style.opacity = '1'
+    front.style.opacity = '0'
+    rampVolume(front, back)
+    transition.current.timer = setTimeout(() => {
+      if (front.style.opacity === '0') front.pause() // stop the now-hidden element
+    }, FADE_MS)
+  }
+
+  // Load `url` into the hidden element and crossfade to it. Loading the hidden
+  // element (not the visible one) avoids interrupting the playing video.
   const playVideo = (url: string, loop: boolean = false) => {
-    const video = videoRef.current
-    if (!video) return
+    const a = videoARef.current
+    const b = videoBRef.current
+    if (!a || !b) return
     console.log('[kiosk] playVideo', { url, loop })
-    // Cancel any in-flight fade/load so a new request can't interrupt the
-    // previous load() mid-flight (DOMException: play() interrupted by load).
-    if (pendingPlay.current) clearTimeout(pendingPlay.current)
-    video.style.opacity = '0'
-    pendingPlay.current = setTimeout(() => {
-      video.src = url
-      video.loop = loop
-      video.load()
-      video.play()
-        .then(() => console.log('[kiosk] playing', url))
-        .catch((err) => console.warn('[kiosk] video.play() rejected:', err))
-      video.style.opacity = '1'
-    }, 500)
+    cancelTransition()
+    const front = frontIdx.current === 0 ? a : b
+    const back = frontIdx.current === 0 ? b : a
+    frontIdx.current = frontIdx.current === 0 ? 1 : 0 // back becomes the new front now
+    back.loop = loop
+    back.volume = 0
+    back.src = url
+    back.load()
+    back.play()
+      .then(() => startFade(front, back))
+      .catch((err) => { console.warn('[kiosk] video.play() rejected:', err); startFade(front, back) })
   }
 
   // Play the current idle ad (loop=false so onEnded advances the rotation).
@@ -73,7 +121,9 @@ export default function App() {
     }
   }
 
-  const handleEnded = () => {
+  const handleEnded = (e: SyntheticEvent<HTMLVideoElement>) => {
+    // Only the visible/front element drives the rotation (the hidden one is paused).
+    if (e.currentTarget !== frontEl()) return
     // An idle ad or a personalized clip just finished → re-check the playlist
     // (picks up drop-ins live) and advance the idle loop.
     if (!inFallback.current) {
@@ -147,14 +197,9 @@ export default function App() {
   }, [])
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: '#000' }}>
-      <video
-        ref={videoRef}
-        style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'opacity 0.5s' }}
-        autoPlay
-        playsInline
-        onEnded={handleEnded}
-      />
+    <div style={{ position: 'relative', width: '100vw', height: '100vh', background: '#000' }}>
+      <video ref={videoARef} style={videoStyle(1)} autoPlay playsInline onEnded={handleEnded} />
+      <video ref={videoBRef} style={videoStyle(0)} autoPlay playsInline onEnded={handleEnded} />
     </div>
   )
 }
