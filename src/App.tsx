@@ -52,6 +52,19 @@ export default function App() {
     playCurrentIdle()
   }
 
+  // Re-fetch the drop-in playlist (composer /playlist). Updates the list in
+  // place so a newly dropped .mp4 is picked up live, no kiosk restart. Keeps
+  // the current list on any failure so the screen is never dark.
+  const refreshPlaylist = () =>
+    fetch(getEnv().PLAYLIST_URL)
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data?.videos) && data.videos.length) {
+          playlist.current = data.videos
+        }
+      })
+      .catch(() => {})
+
   const startFallback = () => {
     const { FALLBACK_VIDEO_PATH } = getEnv()
     if (FALLBACK_VIDEO_PATH && !inFallback.current) {
@@ -61,8 +74,10 @@ export default function App() {
   }
 
   const handleEnded = () => {
-    // An idle ad or a personalized clip just finished → advance the idle loop.
+    // An idle ad or a personalized clip just finished → re-check the playlist
+    // (picks up drop-ins live) and advance the idle loop.
     if (!inFallback.current) {
+      refreshPlaylist()
       advanceIdle()
     }
   }
@@ -76,20 +91,16 @@ export default function App() {
     let retryDelay = 1000
     let retryCount = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
-    const { WS_URL, PLAYLIST_URL } = getEnv()
+    const { WS_URL } = getEnv()
 
-    // Load the idle-ad playlist (drop-in via composer /playlist); keep the
-    // single default on any failure so the screen is never dark.
-    fetch(PLAYLIST_URL)
-      .then((r) => r.json())
-      .then((data) => {
-        if (live && Array.isArray(data?.videos) && data.videos.length) {
-          playlist.current = data.videos
-          idleIndex.current = 0
-          if (!inFallback.current) playCurrentIdle()
-        }
-      })
-      .catch(() => {})
+    // Load the idle-ad playlist and start rotation from it; keep the single
+    // default on failure so the screen is never dark.
+    refreshPlaylist().then(() => {
+      if (live && !inFallback.current) {
+        idleIndex.current = 0
+        playCurrentIdle()
+      }
+    })
 
     const open = () => {
       const ws = new WebSocket(WS_URL)

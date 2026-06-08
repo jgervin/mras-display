@@ -152,6 +152,24 @@ describe('connection lifecycle', () => {
     expect(video.src).toContain('a.mp4') // wraps around
   })
 
+  it('picks up a newly added video on a later refresh without restart', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ json: async () => ({ videos: ['http://x/a.mp4'] }) })
+      .mockResolvedValue({ json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { container } = render(<App />)
+    const video = container.querySelector('video')!
+    await act(async () => { await vi.runAllTimersAsync() })
+    expect(video.src).toContain('a.mp4') // single-item list at startup
+
+    // a video gets dropped in; the kiosk re-fetches on rotation and picks it up
+    await act(async () => { video.dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    await act(async () => { video.dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(video.src).toContain('b.mp4') // new entry now in rotation, no restart
+  })
+
   it('a rapid second play cancels the first pending load (one load)', async () => {
     vi.useFakeTimers()
     render(<App />)
