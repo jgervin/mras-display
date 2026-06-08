@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { render, act } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import App from '../App'
@@ -13,6 +14,7 @@ interface MockWSInstance {
 }
 
 let mockWS: MockWSInstance
+let wsInstances: MockWSInstance[] = []
 const MockWebSocket = vi.fn(() => {
   mockWS = {
     onopen: null, onclose: null, onmessage: null,
@@ -21,12 +23,14 @@ const MockWebSocket = vi.fn(() => {
     simulateClose() { this.onclose?.() },
     simulateMessage(data) { this.onmessage?.({ data: JSON.stringify(data) }) },
   }
+  wsInstances.push(mockWS)
   return mockWS
 })
 
 beforeEach(() => {
   vi.stubGlobal('WebSocket', MockWebSocket)
   MockWebSocket.mockClear()
+  wsInstances = []
   Object.defineProperty(HTMLMediaElement.prototype, 'play', {
     writable: true,
     value: vi.fn().mockResolvedValue(undefined),
@@ -122,6 +126,42 @@ describe('connection lifecycle', () => {
     await act(async () => { vi.advanceTimersByTime(5000) })
 
     expect(MockWebSocket).toHaveBeenCalledTimes(1) // no reconnect spawned by the cleanup close
+  })
+
+  it('a rapid second play cancels the first pending load (one load)', async () => {
+    vi.useFakeTimers()
+    render(<App />)
+    await act(async () => { mockWS.simulateOpen() })
+    await act(async () => { vi.advanceTimersByTime(600) }) // flush the initial standard load
+
+    const loadSpy = HTMLMediaElement.prototype.load as unknown as ReturnType<typeof vi.fn>
+    loadSpy.mockClear()
+
+    // Two play messages inside the 500ms fade window must not both load() —
+    // a second load() interrupting the first play() throws DOMException.
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/first.mp4' })
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/second.mp4' })
+    })
+    await act(async () => { vi.advanceTimersByTime(600) })
+
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a single live socket under StrictMode double-mount (no zombie)', async () => {
+    vi.useFakeTimers()
+    render(<StrictMode><App /></StrictMode>)
+    // StrictMode double-invokes the effect (mount → cleanup → mount): the first
+    // socket is cleaned up, the second is the live one.
+    expect(wsInstances.length).toBe(2)
+
+    // The first (cleaned-up) socket fires its onclose asynchronously, AFTER the
+    // remount. A shared flag would have been reset by the remount and reconnect
+    // (spawning a 3rd zombie socket); a per-connection flag must not.
+    await act(async () => { wsInstances[0].onclose?.() })
+    await act(async () => { vi.advanceTimersByTime(5000) })
+
+    expect(wsInstances.length).toBe(2) // no extra reconnect
   })
 
   it('plays the personalized clip on a play message', async () => {

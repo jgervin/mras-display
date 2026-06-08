@@ -12,21 +12,25 @@ function getEnv() {
 
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
-  const retryDelay = useRef(1000)
-  const retryCount = useRef(0)
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
-  const intentionalClose = useRef(false)
+  const pendingPlay = useRef<ReturnType<typeof setTimeout>>()
 
   const playVideo = (url: string, loop: boolean = false) => {
     const video = videoRef.current
     if (!video) return
+    console.log('[kiosk] playVideo', { url, loop })
+    // Cancel any in-flight fade/load so a new request can't interrupt the
+    // previous load() mid-flight (DOMException: play() interrupted by load).
+    if (pendingPlay.current) clearTimeout(pendingPlay.current)
     video.style.opacity = '0'
-    setTimeout(() => {
+    pendingPlay.current = setTimeout(() => {
       video.src = url
       video.loop = loop
       video.load()
-      video.play().catch((err) => console.warn('kiosk video.play() rejected:', err))
+      video.play()
+        .then(() => console.log('[kiosk] playing', url))
+        .catch((err) => console.warn('[kiosk] video.play() rejected:', err))
       video.style.opacity = '1'
     }, 500)
   }
@@ -39,42 +43,6 @@ export default function App() {
     }
   }
 
-  const connect = () => {
-    const { WS_URL, STANDARD_VIDEO_URL } = getEnv()
-    const ws = new WebSocket(WS_URL)
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      retryDelay.current = 1000
-      retryCount.current = 0
-      if (inFallback.current) {
-        inFallback.current = false
-        playVideo(STANDARD_VIDEO_URL, true)
-      }
-    }
-
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data) as { type: string; video_url: string }
-      if (msg.type === 'play') {
-        playVideo(msg.video_url, false)
-      }
-    }
-
-    ws.onclose = () => {
-      // Don't reconnect when we closed on purpose (e.g. component unmount /
-      // React StrictMode remount) — that spawned overlapping sockets and a
-      // reconnect storm that could miss broadcasts.
-      if (intentionalClose.current) return
-      retryCount.current += 1
-      if (retryCount.current >= MAX_RETRY_ATTEMPTS) {
-        startFallback()
-      }
-      const delay = retryDelay.current
-      retryDelay.current = Math.min(delay * 2, 30000)
-      setTimeout(connect, delay)
-    }
-  }
-
   const handleEnded = () => {
     const { STANDARD_VIDEO_URL } = getEnv()
     if (!inFallback.current) {
@@ -83,12 +51,56 @@ export default function App() {
   }
 
   useEffect(() => {
-    intentionalClose.current = false
-    const { STANDARD_VIDEO_URL } = getEnv()
+    // `live` is captured per effect invocation. Under React StrictMode the
+    // effect runs twice (mount → cleanup → mount); a shared ref would be reset
+    // by the remount and let a stale socket's late onclose reconnect, leaving a
+    // zombie socket. A per-invocation closure flag is immune to that race.
+    let live = true
+    let retryDelay = 1000
+    let retryCount = 0
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+    const { WS_URL, STANDARD_VIDEO_URL } = getEnv()
+
+    const open = () => {
+      const ws = new WebSocket(WS_URL)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        console.log('[kiosk] WS connected')
+        retryDelay = 1000
+        retryCount = 0
+        if (inFallback.current) {
+          inFallback.current = false
+          playVideo(STANDARD_VIDEO_URL, true)
+        }
+      }
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data) as { type: string; video_url: string }
+        console.log('[kiosk] WS message', msg)
+        if (msg.type === 'play') {
+          playVideo(msg.video_url, false)
+        }
+      }
+
+      ws.onclose = () => {
+        if (!live) return // this effect was cleaned up — don't reconnect
+        retryCount += 1
+        if (retryCount >= MAX_RETRY_ATTEMPTS) {
+          startFallback()
+        }
+        const delay = retryDelay
+        retryDelay = Math.min(delay * 2, 30000)
+        reconnectTimer = setTimeout(open, delay)
+      }
+    }
+
     playVideo(STANDARD_VIDEO_URL, true)
-    connect()
+    open()
+
     return () => {
-      intentionalClose.current = true
+      live = false
+      if (reconnectTimer) clearTimeout(reconnectTimer)
       wsRef.current?.close()
     }
   }, [])
