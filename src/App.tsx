@@ -14,13 +14,17 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const pendingPlay = useRef<ReturnType<typeof setTimeout>>()
 
   const playVideo = (url: string, loop: boolean = false) => {
     const video = videoRef.current
     if (!video) return
     console.log('[kiosk] playVideo', { url, loop })
+    // Cancel any in-flight fade/load so a new request can't interrupt the
+    // previous load() mid-flight (DOMException: play() interrupted by load).
+    if (pendingPlay.current) clearTimeout(pendingPlay.current)
     video.style.opacity = '0'
-    setTimeout(() => {
+    pendingPlay.current = setTimeout(() => {
       video.src = url
       video.loop = loop
       video.load()

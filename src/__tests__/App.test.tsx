@@ -128,6 +128,26 @@ describe('connection lifecycle', () => {
     expect(MockWebSocket).toHaveBeenCalledTimes(1) // no reconnect spawned by the cleanup close
   })
 
+  it('a rapid second play cancels the first pending load (one load)', async () => {
+    vi.useFakeTimers()
+    render(<App />)
+    await act(async () => { mockWS.simulateOpen() })
+    await act(async () => { vi.advanceTimersByTime(600) }) // flush the initial standard load
+
+    const loadSpy = HTMLMediaElement.prototype.load as unknown as ReturnType<typeof vi.fn>
+    loadSpy.mockClear()
+
+    // Two play messages inside the 500ms fade window must not both load() —
+    // a second load() interrupting the first play() throws DOMException.
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/first.mp4' })
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/second.mp4' })
+    })
+    await act(async () => { vi.advanceTimersByTime(600) })
+
+    expect(loadSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps a single live socket under StrictMode double-mount (no zombie)', async () => {
     vi.useFakeTimers()
     render(<StrictMode><App /></StrictMode>)
