@@ -1,8 +1,10 @@
 import { useEffect, useRef, type SyntheticEvent } from 'react'
 
 const MAX_RETRY_ATTEMPTS = 5
-const FADE_MS = 500       // crossfade duration (matches the CSS opacity transition)
-const VOLUME_STEPS = 10   // audio ramp granularity over FADE_MS
+const FADE_MS = 500       // video crossfade duration (matches the CSS opacity transition)
+const AUDIO_FADE_MS = 250 // audio blend duration — shorter than the video fade so an early
+                          // name mention reaches full volume before it can be muted
+const VOLUME_STEPS = 10   // audio ramp granularity over AUDIO_FADE_MS
 
 function getEnv() {
   return {
@@ -44,7 +46,7 @@ export default function App() {
     if (transition.current.ramp) { clearInterval(transition.current.ramp); transition.current.ramp = undefined }
   }
 
-  // Ramp the old element's audio down and the new element's up over FADE_MS.
+  // Ramp the old element's audio down and the new element's up over AUDIO_FADE_MS.
   const rampVolume = (front: HTMLVideoElement, back: HTMLVideoElement) => {
     let i = 0
     transition.current.ramp = setInterval(() => {
@@ -53,7 +55,7 @@ export default function App() {
       front.volume = Math.max(0, 1 - t)
       back.volume = Math.min(1, t)
       if (i >= VOLUME_STEPS) { clearInterval(transition.current.ramp); transition.current.ramp = undefined }
-    }, FADE_MS / VOLUME_STEPS)
+    }, AUDIO_FADE_MS / VOLUME_STEPS)
   }
 
   // Crossfade: fade `back` (already loaded + playing) in while `front` fades out.
