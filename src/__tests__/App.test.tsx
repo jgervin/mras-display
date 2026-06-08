@@ -269,6 +269,23 @@ describe('crossfade', () => {
     expect(before.volume).toBe(0)
   })
 
+  it('completes the audio blend within 250ms (faster than the 500ms video fade) so an early name mention is not muted', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    const before = activeVideo(container)
+
+    await act(async () => { mockWS.simulateOpen() })
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/named.mp4' })
+      await vi.advanceTimersByTimeAsync(250)
+    })
+
+    const after = activeVideo(container)
+    expect(after.volume).toBe(1) // new clip already at full volume by 250ms
+    expect(before.volume).toBe(0)
+  })
+
   it('pauses the faded-out element after the transition', async () => {
     vi.useFakeTimers()
     const pauseSpy = HTMLMediaElement.prototype.pause as unknown as ReturnType<typeof vi.fn>
