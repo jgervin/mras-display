@@ -29,6 +29,9 @@ const MockWebSocket = vi.fn(() => {
 
 beforeEach(() => {
   vi.stubGlobal('WebSocket', MockWebSocket)
+  // Default: empty playlist → kiosk keeps its single default video (keeps the
+  // other tests off the network). The rotation test overrides this.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ videos: [] }) }))
   MockWebSocket.mockClear()
   wsInstances = []
   Object.defineProperty(HTMLMediaElement.prototype, 'play', {
@@ -126,6 +129,27 @@ describe('connection lifecycle', () => {
     await act(async () => { vi.advanceTimersByTime(5000) })
 
     expect(MockWebSocket).toHaveBeenCalledTimes(1) // no reconnect spawned by the cleanup close
+  })
+
+  it('rotates sequentially through the fetched playlist on ended', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4', 'http://x/c.mp4'] }),
+    }))
+    const { container } = render(<App />)
+    const video = container.querySelector('video')!
+
+    await act(async () => { await vi.runAllTimersAsync() }) // fetch resolves + fade timer
+    expect(video.src).toContain('a.mp4')
+
+    await act(async () => { video.dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(video.src).toContain('b.mp4')
+
+    await act(async () => { video.dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(video.src).toContain('c.mp4')
+
+    await act(async () => { video.dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(video.src).toContain('a.mp4') // wraps around
   })
 
   it('a rapid second play cancels the first pending load (one load)', async () => {

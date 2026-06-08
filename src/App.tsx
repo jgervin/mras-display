@@ -6,6 +6,7 @@ function getEnv() {
   return {
     WS_URL: import.meta.env.VITE_COMPOSER_WS_URL ?? 'ws://localhost:8002/ws',
     STANDARD_VIDEO_URL: import.meta.env.VITE_STANDARD_VIDEO_URL ?? 'http://localhost:8002/assets/standard.mp4',
+    PLAYLIST_URL: import.meta.env.VITE_PLAYLIST_URL ?? 'http://localhost:8002/playlist',
     FALLBACK_VIDEO_PATH: import.meta.env.VITE_FALLBACK_VIDEO_PATH ?? '',
   }
 }
@@ -15,6 +16,10 @@ export default function App() {
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
   const pendingPlay = useRef<ReturnType<typeof setTimeout>>()
+  // Idle-ad rotation: sequential playlist, replaced by the composer /playlist
+  // response (drop a .mp4 into assets/ to add one). Starts as the single default.
+  const playlist = useRef<string[]>([getEnv().STANDARD_VIDEO_URL])
+  const idleIndex = useRef(0)
 
   const playVideo = (url: string, loop: boolean = false) => {
     const video = videoRef.current
@@ -35,6 +40,18 @@ export default function App() {
     }, 500)
   }
 
+  // Play the current idle ad (loop=false so onEnded advances the rotation).
+  const playCurrentIdle = () => {
+    const list = playlist.current
+    playVideo(list[idleIndex.current % list.length], false)
+  }
+
+  // Move to the next idle ad in the playlist and play it.
+  const advanceIdle = () => {
+    idleIndex.current = (idleIndex.current + 1) % playlist.current.length
+    playCurrentIdle()
+  }
+
   const startFallback = () => {
     const { FALLBACK_VIDEO_PATH } = getEnv()
     if (FALLBACK_VIDEO_PATH && !inFallback.current) {
@@ -44,9 +61,9 @@ export default function App() {
   }
 
   const handleEnded = () => {
-    const { STANDARD_VIDEO_URL } = getEnv()
+    // An idle ad or a personalized clip just finished → advance the idle loop.
     if (!inFallback.current) {
-      playVideo(STANDARD_VIDEO_URL, true)
+      advanceIdle()
     }
   }
 
@@ -59,7 +76,20 @@ export default function App() {
     let retryDelay = 1000
     let retryCount = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
-    const { WS_URL, STANDARD_VIDEO_URL } = getEnv()
+    const { WS_URL, PLAYLIST_URL } = getEnv()
+
+    // Load the idle-ad playlist (drop-in via composer /playlist); keep the
+    // single default on any failure so the screen is never dark.
+    fetch(PLAYLIST_URL)
+      .then((r) => r.json())
+      .then((data) => {
+        if (live && Array.isArray(data?.videos) && data.videos.length) {
+          playlist.current = data.videos
+          idleIndex.current = 0
+          if (!inFallback.current) playCurrentIdle()
+        }
+      })
+      .catch(() => {})
 
     const open = () => {
       const ws = new WebSocket(WS_URL)
@@ -71,7 +101,7 @@ export default function App() {
         retryCount = 0
         if (inFallback.current) {
           inFallback.current = false
-          playVideo(STANDARD_VIDEO_URL, true)
+          playCurrentIdle()
         }
       }
 
@@ -95,7 +125,7 @@ export default function App() {
       }
     }
 
-    playVideo(STANDARD_VIDEO_URL, true)
+    playCurrentIdle()
     open()
 
     return () => {
