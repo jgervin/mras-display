@@ -29,6 +29,9 @@ const MockWebSocket = vi.fn(() => {
 
 beforeEach(() => {
   vi.stubGlobal('WebSocket', MockWebSocket)
+  // Default: empty playlist → kiosk keeps its single default video (keeps the
+  // other tests off the network). The rotation test overrides this.
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ json: async () => ({ videos: [] }) }))
   MockWebSocket.mockClear()
   wsInstances = []
   Object.defineProperty(HTMLMediaElement.prototype, 'play', {
@@ -39,7 +42,24 @@ beforeEach(() => {
     writable: true,
     value: vi.fn(),
   })
+  Object.defineProperty(HTMLMediaElement.prototype, 'pause', {
+    writable: true,
+    value: vi.fn(),
+  })
+  // Per-element volume backing (jsdom's volume is finicky); allows ramp assertions.
+  const volStore = new WeakMap<HTMLMediaElement, number>()
+  Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
+    configurable: true,
+    get() { return volStore.get(this) ?? 1 },
+    set(v: number) { volStore.set(this, v) },
+  })
 })
+
+// The visible ("front") video is the one currently at full opacity.
+function activeVideo(container: HTMLElement): HTMLVideoElement {
+  const vids = Array.from(container.querySelectorAll('video')) as HTMLVideoElement[]
+  return vids.find((v) => v.style.opacity === '1') ?? vids[0]
+}
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -80,7 +100,6 @@ describe('WebSocket reconnect backoff', () => {
     vi.stubEnv('VITE_FALLBACK_VIDEO_PATH', '/local/fallback.mp4')
 
     const { container } = render(<App />)
-    const video = container.querySelector('video')!
 
     let delay = 1000
     for (let i = 0; i < 5; i++) {
@@ -88,8 +107,9 @@ describe('WebSocket reconnect backoff', () => {
       await act(async () => { vi.advanceTimersByTime(delay) })
       delay = Math.min(delay * 2, 30000)
     }
+    await act(async () => { await vi.runAllTimersAsync() })
 
-    expect(video.src).toContain('fallback.mp4')
+    expect(activeVideo(container).src).toContain('fallback.mp4')
   })
 
   it('restores standard video on successful reconnect after fallback', async () => {
@@ -98,7 +118,6 @@ describe('WebSocket reconnect backoff', () => {
     vi.stubEnv('VITE_STANDARD_VIDEO_URL', 'http://localhost:8002/assets/standard.mp4')
 
     const { container } = render(<App />)
-    const video = container.querySelector('video')!
 
     let delay = 1000
     for (let i = 0; i < 5; i++) {
@@ -108,9 +127,9 @@ describe('WebSocket reconnect backoff', () => {
     }
 
     await act(async () => { mockWS.simulateOpen() })
-    await act(async () => { vi.advanceTimersByTime(600) })
+    await act(async () => { await vi.runAllTimersAsync() })
 
-    expect(video.src).toContain('standard.mp4')
+    expect(activeVideo(container).src).toContain('standard.mp4')
   })
 })
 
@@ -128,24 +147,56 @@ describe('connection lifecycle', () => {
     expect(MockWebSocket).toHaveBeenCalledTimes(1) // no reconnect spawned by the cleanup close
   })
 
-  it('a rapid second play cancels the first pending load (one load)', async () => {
+  it('rotates sequentially through the fetched playlist on ended', async () => {
     vi.useFakeTimers()
-    render(<App />)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4', 'http://x/c.mp4'] }),
+    }))
+    const { container } = render(<App />)
+
+    await act(async () => { await vi.runAllTimersAsync() }) // fetch resolves + fade timer
+    expect(activeVideo(container).src).toContain('a.mp4')
+
+    await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(activeVideo(container).src).toContain('b.mp4')
+
+    await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(activeVideo(container).src).toContain('c.mp4')
+
+    await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(activeVideo(container).src).toContain('a.mp4') // wraps around
+  })
+
+  it('picks up a newly added video on a later refresh without restart', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ json: async () => ({ videos: ['http://x/a.mp4'] }) })
+      .mockResolvedValue({ json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }) })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    expect(activeVideo(container).src).toContain('a.mp4') // single-item list at startup
+
+    // a video gets dropped in; the kiosk re-fetches on rotation and picks it up
+    await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
+    expect(activeVideo(container).src).toContain('b.mp4') // new entry now in rotation, no restart
+  })
+
+  it('the later of two rapid play messages wins', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
     await act(async () => { mockWS.simulateOpen() })
-    await act(async () => { vi.advanceTimersByTime(600) }) // flush the initial standard load
 
-    const loadSpy = HTMLMediaElement.prototype.load as unknown as ReturnType<typeof vi.fn>
-    loadSpy.mockClear()
-
-    // Two play messages inside the 500ms fade window must not both load() —
-    // a second load() interrupting the first play() throws DOMException.
     await act(async () => {
       mockWS.simulateMessage({ type: 'play', video_url: 'http://x/first.mp4' })
       mockWS.simulateMessage({ type: 'play', video_url: 'http://x/second.mp4' })
+      await vi.runAllTimersAsync()
     })
-    await act(async () => { vi.advanceTimersByTime(600) })
 
-    expect(loadSpy).toHaveBeenCalledTimes(1)
+    expect(activeVideo(container).src).toContain('second.mp4')
   })
 
   it('keeps a single live socket under StrictMode double-mount (no zombie)', async () => {
@@ -167,15 +218,70 @@ describe('connection lifecycle', () => {
   it('plays the personalized clip on a play message', async () => {
     vi.useFakeTimers()
     const { container } = render(<App />)
-    const video = container.querySelector('video')!
+    await act(async () => { await vi.runAllTimersAsync() })
 
     await act(async () => { mockWS.simulateOpen() })
     await act(async () => {
       mockWS.simulateMessage({ type: 'play', video_url: 'http://localhost:8002/media/abc.mp4' })
+      await vi.runAllTimersAsync()
     })
-    await act(async () => { vi.advanceTimersByTime(600) })
 
-    expect(video.src).toContain('/media/abc.mp4')
-    expect(video.loop).toBe(false)
+    const v = activeVideo(container)
+    expect(v.src).toContain('/media/abc.mp4')
+    expect(v.loop).toBe(false)
+  })
+})
+
+describe('crossfade', () => {
+  it('crossfades into the other element on a play message (roles swap)', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    const before = activeVideo(container)
+
+    await act(async () => { mockWS.simulateOpen() })
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://localhost:8002/media/abc.mp4' })
+      await vi.runAllTimersAsync()
+    })
+
+    const after = activeVideo(container)
+    expect(after).not.toBe(before)              // a different element is now visible
+    expect(after.src).toContain('/media/abc.mp4')
+    expect(after.style.opacity).toBe('1')
+    expect(before.style.opacity).toBe('0')      // old element faded out
+  })
+
+  it('cross-fades audio: new element to full volume, old to zero', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    const before = activeVideo(container)
+
+    await act(async () => { mockWS.simulateOpen() })
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/named.mp4' })
+      await vi.runAllTimersAsync()
+    })
+
+    const after = activeVideo(container)
+    expect(after.volume).toBe(1)
+    expect(before.volume).toBe(0)
+  })
+
+  it('pauses the faded-out element after the transition', async () => {
+    vi.useFakeTimers()
+    const pauseSpy = HTMLMediaElement.prototype.pause as unknown as ReturnType<typeof vi.fn>
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+
+    await act(async () => { mockWS.simulateOpen() })
+    pauseSpy.mockClear()
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/named.mp4' })
+      await vi.runAllTimersAsync()
+    })
+
+    expect(pauseSpy).toHaveBeenCalled()
   })
 })
