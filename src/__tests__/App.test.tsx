@@ -249,6 +249,76 @@ describe('connection lifecycle', () => {
   })
 })
 
+describe('click-to-pause', () => {
+  it('clicking the screen pauses the visible video', async () => {
+    vi.useFakeTimers()
+    const pauseSpy = HTMLMediaElement.prototype.pause as unknown as ReturnType<typeof vi.fn>
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    pauseSpy.mockClear()
+
+    await act(async () => { ;(container.firstChild as HTMLElement).click() })
+
+    expect(pauseSpy).toHaveBeenCalled()
+  })
+
+  it('clicking again resumes the visible video', async () => {
+    vi.useFakeTimers()
+    const playSpy = HTMLMediaElement.prototype.play as unknown as ReturnType<typeof vi.fn>
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+
+    // First click: pause
+    await act(async () => { ;(container.firstChild as HTMLElement).click() })
+    playSpy.mockClear()
+
+    // Second click: resume
+    await act(async () => { ;(container.firstChild as HTMLElement).click() })
+
+    expect(playSpy).toHaveBeenCalled()
+  })
+
+  it('a play WS message still crossfades to the new clip while paused', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+
+    // Pause first
+    await act(async () => { ;(container.firstChild as HTMLElement).click() })
+
+    // WS play message arrives while paused
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/named.mp4' })
+      await vi.runAllTimersAsync()
+    })
+
+    expect(activeVideo(container).src).toContain('named.mp4')
+    expect(activeVideo(container).style.opacity).toBe('1')
+  })
+
+  it('ended while paused does not advance the idle rotation', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }),
+    }))
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    expect(activeVideo(container).src).toContain('a.mp4')
+
+    // Pause
+    await act(async () => { ;(container.firstChild as HTMLElement).click() })
+    const srcBefore = activeVideo(container).src
+
+    // Fire ended on the front video — should not advance rotation
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    expect(activeVideo(container).src).toBe(srcBefore)
+  })
+})
+
 describe('crossfade', () => {
   it('crossfades into the other element on a play message (roles swap)', async () => {
     vi.useFakeTimers()
