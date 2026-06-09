@@ -36,6 +36,7 @@ export default function App() {
   // response (drop a .mp4 into assets/ to add one). Starts as the single default.
   const playlist = useRef<string[]>([getEnv().STANDARD_VIDEO_URL])
   const idleIndex = useRef(0)
+  const paused = useRef(false)
 
   const frontEl = () => (frontIdx.current === 0 ? videoARef.current : videoBRef.current)
 
@@ -121,9 +122,21 @@ export default function App() {
     }
   }
 
+  const togglePause = () => {
+    if (paused.current) {
+      paused.current = false
+      frontEl()?.play()
+    } else {
+      paused.current = true
+      frontEl()?.pause()
+    }
+  }
+
   const handleEnded = (e: SyntheticEvent<HTMLVideoElement>) => {
     // Only the visible/front element drives the rotation (the hidden one is paused).
     if (e.currentTarget !== frontEl()) return
+    // Don't advance while the user has the loop paused.
+    if (paused.current) return
     // An idle ad or a personalized clip just finished → re-check the playlist
     // (picks up drop-ins live) and advance the idle loop.
     if (!inFallback.current) {
@@ -170,6 +183,7 @@ export default function App() {
         const msg = JSON.parse(event.data) as { type: string; video_url: string }
         console.log('[kiosk] WS message', msg)
         if (msg.type === 'play') {
+          paused.current = false // generated clips always play; idle resumes un-paused afterward
           playVideo(msg.video_url, false)
         }
       }
@@ -200,7 +214,7 @@ export default function App() {
   }, [])
 
   return (
-    <div style={{ position: 'relative', width: '100vw', height: '100vh', background: '#000' }}>
+    <div style={{ position: 'relative', width: '100vw', height: '100vh', background: '#000' }} onClick={togglePause}>
       <video ref={videoARef} style={videoStyle(1)} autoPlay playsInline onEnded={handleEnded} />
       <video ref={videoBRef} style={videoStyle(0)} autoPlay playsInline onEnded={handleEnded} />
     </div>
