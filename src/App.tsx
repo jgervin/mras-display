@@ -186,7 +186,10 @@ export default function App() {
       }
     }
 
-    playCurrentIdle()
+    // Idle playback is started above, after refreshPlaylist() resolves (and gated by
+    // `live`, so it's StrictMode-safe). Do NOT also start it synchronously here — a second
+    // start flips frontIdx an extra time, desyncing it from the visible element and freezing
+    // the rotation (handleEnded's front-element guard then never matches).
     open()
 
     return () => {

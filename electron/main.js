@@ -22,7 +22,8 @@ function createWindow() {
 
   if (process.env.NODE_ENV === 'development') {
     win.loadURL('http://localhost:5173')
-    win.webContents.openDevTools({ mode: 'detach' })
+    // DevTools off by default for the kiosk. Set KIOSK_DEVTOOLS=1 to re-enable while debugging.
+    if (process.env.KIOSK_DEVTOOLS === '1') win.webContents.openDevTools({ mode: 'detach' })
   } else {
     win.loadFile(path.join(__dirname, '../dist/index.html'))
   }
