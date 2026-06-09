@@ -147,6 +147,23 @@ describe('connection lifecycle', () => {
     expect(MockWebSocket).toHaveBeenCalledTimes(1) // no reconnect spawned by the cleanup close
   })
 
+  it('starts idle playback exactly once on mount (no duplicate start that desyncs the crossfade)', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }),
+    }))
+    const playSpy = HTMLMediaElement.prototype.play as unknown as ReturnType<typeof vi.fn>
+    playSpy.mockClear()
+
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+
+    // Exactly one initial crossfade (one play). A second synchronous start would
+    // flip frontIdx an extra time, desyncing it from the visible element and
+    // freezing the rotation (handleEnded's front-element guard never matches).
+    expect(playSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('rotates sequentially through the fetched playlist on ended', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
