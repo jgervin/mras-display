@@ -24,8 +24,20 @@ function startHealthServer(port, getEntries) {
       res.end()
     }
   })
+  // Health is best-effort: a port conflict (EADDRINUSE — e.g. a second kiosk
+  // instance) must degrade monitoring, never crash the kiosk it monitors.
+  server.on('error', (err) => {
+    console.error('[health] server error:', err.message)
+  })
   server.listen(port)
   return server
 }
 
-module.exports = { healthPayload, startHealthServer }
+// Delay before recreating a crashed renderer window: 1s, 2s, 4s … capped at
+// 30s, so a renderer that dies instantly every time (bad GPU, broken bundle)
+// can't fork replacement processes in a hot loop.
+function crashBackoffMs(consecutiveCrashes) {
+  return Math.min(1000 * 2 ** (consecutiveCrashes - 1), 30000)
+}
+
+module.exports = { healthPayload, startHealthServer, crashBackoffMs }

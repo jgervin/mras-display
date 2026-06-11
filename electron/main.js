@@ -1,10 +1,12 @@
 const { app, BrowserWindow, screen } = require('electron')
 const path = require('path')
 const { clampCount, windowConfigs } = require('./layout')
-const { startHealthServer } = require('./health')
+const { startHealthServer, crashBackoffMs } = require('./health')
 
 // screenId → BrowserWindow, for per-window crash recovery and /health.
 const windows = new Map()
+// screenId → consecutive renderer crashes, drives recreate backoff.
+const crashCounts = new Map()
 
 function createWindow(config) {
   const { screenId, x, y, width, height, fullscreen } = config
@@ -34,10 +36,19 @@ function createWindow(config) {
   // T3 inner watchdog layer: one display crashing must not dark-screen the
   // other windows or restart the whole app (launchd handles whole-app death).
   win.webContents.on('render-process-gone', (_event, details) => {
-    console.log(`[watchdog] renderer ${screenId} gone (${details.reason}) — recreating window`)
+    if (details.reason === 'clean-exit') return // normal shutdown, not a crash
+    const crashes = (crashCounts.get(screenId) ?? 0) + 1
+    crashCounts.set(screenId, crashes)
+    const delay = crashBackoffMs(crashes)
+    console.log(`[watchdog] renderer ${screenId} gone (${details.reason}) — recreating in ${delay}ms (crash #${crashes})`)
     windows.delete(screenId)
-    createWindow(config) // replacement first, so window-all-closed can't fire
-    if (!win.isDestroyed()) win.destroy()
+    setTimeout(() => {
+      createWindow(config) // replacement first, then drop the dead shell
+      if (!win.isDestroyed()) win.destroy()
+    }, delay)
+  })
+  win.webContents.on('did-finish-load', () => {
+    crashCounts.delete(screenId) // healthy load resets the backoff
   })
   win.on('unresponsive', () => {
     console.log(`[watchdog] renderer ${screenId} unresponsive — reloading`)
