@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mras.kiosk</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jn/code/mras-display/node_modules/.bin/electron</string>
+    <string>/Users/jn/code/mras-display</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/jn/code/mras-display</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/mras-kiosk.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/mras-kiosk.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DISPLAY_COUNT</key>
+    <string>4</string>
+  </dict>
+</dict>
+</plist>
