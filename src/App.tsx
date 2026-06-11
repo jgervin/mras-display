@@ -1,4 +1,5 @@
 import { useEffect, useRef, type SyntheticEvent } from 'react'
+import { createShuffler } from './shuffle'
 
 const MAX_RETRY_ATTEMPTS = 5
 const FADE_MS = 500       // crossfade duration (matches the CSS opacity transition)
@@ -32,10 +33,10 @@ export default function App() {
 
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
-  // Idle-ad rotation: sequential playlist, replaced by the composer /playlist
-  // response (drop a .mp4 into assets/ to add one). Starts as the single default.
-  const playlist = useRef<string[]>([getEnv().STANDARD_VIDEO_URL])
-  const idleIndex = useRef(0)
+  // Idle-ad rotation: shuffled cycle over the composer /playlist pool (drop a
+  // .mp4 into assets/ to add one). Starts as the single default video.
+  const shuffler = useRef(createShuffler([getEnv().STANDARD_VIDEO_URL]))
+  const currentIdle = useRef<string | null>(null)
   const paused = useRef(false)
 
   const frontEl = () => (frontIdx.current === 0 ? videoARef.current : videoBRef.current)
@@ -89,16 +90,19 @@ export default function App() {
       .catch((err) => { console.warn('[kiosk] video.play() rejected:', err); startFade(front, back) })
   }
 
-  // Play the current idle ad (loop=false so onEnded advances the rotation).
+  // Play the current idle ad (loop=false so onEnded advances the rotation);
+  // pulls the first item from the shuffled cycle on the very first call.
   const playCurrentIdle = () => {
-    const list = playlist.current
-    playVideo(list[idleIndex.current % list.length], false)
+    const url = currentIdle.current ?? shuffler.current.next()
+    currentIdle.current = url
+    playVideo(url, false)
   }
 
-  // Move to the next idle ad in the playlist and play it.
+  // Move to the next idle ad in the shuffled cycle and play it.
   const advanceIdle = () => {
-    idleIndex.current = (idleIndex.current + 1) % playlist.current.length
-    playCurrentIdle()
+    const url = shuffler.current.next()
+    currentIdle.current = url
+    playVideo(url, false)
   }
 
   // Re-fetch the drop-in playlist (composer /playlist). Updates the list in
@@ -109,7 +113,7 @@ export default function App() {
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data?.videos) && data.videos.length) {
-          playlist.current = data.videos
+          shuffler.current.setItems(data.videos)
         }
       })
       .catch(() => {})
@@ -155,18 +159,25 @@ export default function App() {
     let retryCount = 0
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined
     const { WS_URL } = getEnv()
+    // Multi-display: each kiosk window carries its identity in the query
+    // string (electron/main.js sets ?screen_id=display-<n>). Forwarded on the
+    // WS URL so the composer can target individual displays later; the
+    // composer ignores it today (broadcasts `play` to every client).
+    const screenId = new URLSearchParams(window.location.search).get('screen_id')
+    const wsUrl = screenId
+      ? `${WS_URL}${WS_URL.includes('?') ? '&' : '?'}screen_id=${encodeURIComponent(screenId)}`
+      : WS_URL
 
     // Load the idle-ad playlist and start rotation from it; keep the single
     // default on failure so the screen is never dark.
     refreshPlaylist().then(() => {
       if (live && !inFallback.current) {
-        idleIndex.current = 0
         playCurrentIdle()
       }
     })
 
     const open = () => {
-      const ws = new WebSocket(WS_URL)
+      const ws = new WebSocket(wsUrl)
       wsRef.current = ws
 
       ws.onopen = () => {

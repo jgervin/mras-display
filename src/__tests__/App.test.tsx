@@ -3,6 +3,23 @@ import { render, act } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import App from '../App'
 
+// Deterministic stand-in for the shuffle module: cycles the pool in REVERSED
+// order (distinguishable from sequential list order). The real Fisher-Yates
+// algorithm is covered by shuffle.test.ts; these tests verify App's wiring.
+vi.mock('../shuffle', () => ({
+  createShuffler: (initial: string[]) => {
+    let pool = [...initial]
+    let queue: string[] = []
+    return {
+      next: () => {
+        if (queue.length === 0) queue = [...pool].reverse()
+        return queue.shift() as string
+      },
+      setItems: (items: string[]) => { pool = [...items] },
+    }
+  },
+}))
+
 interface MockWSInstance {
   onopen: (() => void) | null
   onclose: (() => void) | null
@@ -64,6 +81,7 @@ function activeVideo(container: HTMLElement): HTMLVideoElement {
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
+  window.history.pushState({}, '', '/') // reset any screen_id query a test set
 })
 
 describe('WebSocket reconnect backoff', () => {
@@ -164,24 +182,36 @@ describe('connection lifecycle', () => {
     expect(playSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('rotates sequentially through the fetched playlist on ended', async () => {
+  it('idle rotation follows the shuffler order, not playlist order', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4', 'http://x/c.mp4'] }),
     }))
     const { container } = render(<App />)
 
+    // The mocked shuffler cycles in reversed pool order: c → b → a. If the app
+    // still walked the list sequentially this would start at a.mp4 and fail.
     await act(async () => { await vi.runAllTimersAsync() }) // fetch resolves + fade timer
-    expect(activeVideo(container).src).toContain('a.mp4')
+    expect(activeVideo(container).src).toContain('c.mp4')
 
     await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
     expect(activeVideo(container).src).toContain('b.mp4')
 
     await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
-    expect(activeVideo(container).src).toContain('c.mp4')
+    expect(activeVideo(container).src).toContain('a.mp4')
+  })
 
-    await act(async () => { activeVideo(container).dispatchEvent(new Event('ended')); await vi.runAllTimersAsync() })
-    expect(activeVideo(container).src).toContain('a.mp4') // wraps around
+  it('appends screen_id from the query string to the WS URL', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-3')
+    render(<App />)
+    expect(MockWebSocket).toHaveBeenCalledWith('ws://localhost:8002/ws?screen_id=display-3')
+  })
+
+  it('connects without a screen_id param when none is in the query', async () => {
+    vi.useFakeTimers()
+    render(<App />)
+    expect(MockWebSocket).toHaveBeenCalledWith('ws://localhost:8002/ws')
   })
 
   it('picks up a newly added video on a later refresh without restart', async () => {
@@ -303,7 +333,7 @@ describe('click-to-pause', () => {
     }))
     const { container } = render(<App />)
     await act(async () => { await vi.runAllTimersAsync() })
-    expect(activeVideo(container).src).toContain('a.mp4')
+    expect(activeVideo(container).src).toContain('b.mp4') // mocked shuffler: reversed order
 
     // Pause
     await act(async () => { ;(container.firstChild as HTMLElement).click() })
