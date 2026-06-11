@@ -13,9 +13,10 @@ describe('launchd supervisor plist', () => {
     expect(xml).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/)
   })
 
-  it('launches the electron binary against this repo', () => {
+  it('launches the real Electron binary (launchd has no node on PATH)', () => {
     const xml = plist()
-    expect(xml).toContain('node_modules/.bin/electron')
+    expect(xml).toContain('node_modules/electron/dist/Electron.app/Contents/MacOS/Electron')
+    expect(xml).not.toContain('node_modules/.bin/electron') // env-node shim breaks under launchd
     expect(xml).toContain('<key>Label</key>')
     expect(xml).toContain('com.mras.kiosk')
   })
