@@ -402,3 +402,38 @@ describe('crossfade', () => {
     expect(pauseSpy).toHaveBeenCalled()
   })
 })
+
+describe('debug badge (KIOSK_DEBUG)', () => {
+  it('shows the badge with the screen id when ?debug=1', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2&debug=1')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    const badge = container.querySelector('[data-testid="debug-badge"]')
+    expect(badge?.textContent).toContain('display-2')
+  })
+
+  it('updates the badge with person and ad from a play message', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-1&debug=1')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => {
+      mockWS.simulateMessage({
+        type: 'play', video_url: 'http://x/v.mp4',
+        person: 'Ragnar Ervin', ad: 'comp-fallingsnow',
+      })
+      await vi.runAllTimersAsync()
+    })
+    const badge = container.querySelector('[data-testid="debug-badge"]')
+    expect(badge?.textContent).toContain('Ragnar Ervin')
+    expect(badge?.textContent).toContain('comp-fallingsnow')
+  })
+
+  it('renders no badge without the debug param', async () => {
+    vi.useFakeTimers()
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    expect(container.querySelector('[data-testid="debug-badge"]')).toBeNull()
+  })
+})
