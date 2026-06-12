@@ -55,12 +55,14 @@ function createWindow(config) {
     win.webContents.reload()
   })
 
+  // KIOSK_DEBUG=1 → each window overlays an HTML badge (screen · person · ad).
+  const query = `screen_id=${screenId}${process.env.KIOSK_DEBUG === '1' ? '&debug=1' : ''}`
   if (process.env.NODE_ENV === 'development') {
-    win.loadURL(`http://localhost:5173/?screen_id=${screenId}`)
+    win.loadURL(`http://localhost:5173/?${query}`)
     // DevTools off by default for the kiosk. Set KIOSK_DEVTOOLS=1 to re-enable while debugging.
     if (process.env.KIOSK_DEVTOOLS === '1') win.webContents.openDevTools({ mode: 'detach' })
   } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'), { search: `screen_id=${screenId}` })
+    win.loadFile(path.join(__dirname, '../dist/index.html'), { search: query })
   }
 }
 

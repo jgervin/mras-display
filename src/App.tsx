@@ -1,4 +1,4 @@
-import { useEffect, useRef, type SyntheticEvent } from 'react'
+import { useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { createShuffler } from './shuffle'
 
 const MAX_RETRY_ATTEMPTS = 5
@@ -38,6 +38,11 @@ export default function App() {
   const shuffler = useRef(createShuffler([getEnv().STANDARD_VIDEO_URL]))
   const currentIdle = useRef<string | null>(null)
   const paused = useRef(false)
+  // Debug badge (?debug=1): screen identity + the last play message's person
+  // and ad. Plain HTML — independent of the video pipeline, so it shows the
+  // chosen ad even when an on-video overlay failed to render.
+  const debugEnabled = new URLSearchParams(window.location.search).get('debug') === '1'
+  const [debugInfo, setDebugInfo] = useState<{ person?: string; ad?: string }>({})
 
   const frontEl = () => (frontIdx.current === 0 ? videoARef.current : videoBRef.current)
 
@@ -191,10 +196,13 @@ export default function App() {
       }
 
       ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data) as { type: string; video_url: string }
+        const msg = JSON.parse(event.data) as {
+          type: string; video_url: string; person?: string; ad?: string
+        }
         console.log('[kiosk] WS message', msg)
         if (msg.type === 'play') {
           paused.current = false // generated clips always play; idle resumes un-paused afterward
+          setDebugInfo({ person: msg.person, ad: msg.ad })
           playVideo(msg.video_url, false)
         }
       }
@@ -228,6 +236,20 @@ export default function App() {
     <div style={{ position: 'relative', width: '100vw', height: '100vh', background: '#000' }} onClick={togglePause}>
       <video ref={videoARef} style={videoStyle(1)} autoPlay playsInline onEnded={handleEnded} />
       <video ref={videoBRef} style={videoStyle(0)} autoPlay playsInline onEnded={handleEnded} />
+      {debugEnabled && (
+        <div
+          data-testid="debug-badge"
+          style={{
+            position: 'absolute', top: 8, left: 8, zIndex: 10,
+            padding: '4px 10px', borderRadius: 6, fontFamily: 'monospace',
+            fontSize: 14, color: '#0f0', background: 'rgba(0,0,0,0.65)',
+            pointerEvents: 'none',
+          }}
+        >
+          {new URLSearchParams(window.location.search).get('screen_id') ?? 'display-?'}
+          {' · '}{debugInfo.person ?? '—'}{' · '}{debugInfo.ad ?? 'idle'}
+        </div>
+      )}
     </div>
   )
 }
