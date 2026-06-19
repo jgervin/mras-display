@@ -33,6 +33,10 @@ export default function App() {
 
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
+  // Non-null while a personalized (composer-pushed) clip is the current video.
+  // Holds its clip id; cleared once we hand control back to the composer.
+  const personalizedClipRef = useRef<string | null>(null)
+  const screenIdRef = useRef<string | null>(null)
   // Idle-ad rotation: shuffled cycle over the composer /playlist pool (drop a
   // .mp4 into assets/ to add one). Starts as the single default video.
   const shuffler = useRef(createShuffler([getEnv().STANDARD_VIDEO_URL]))
@@ -146,12 +150,22 @@ export default function App() {
     if (e.currentTarget !== frontEl()) return
     // Don't advance while the user has the loop paused.
     if (paused.current) return
-    // An idle ad or a personalized clip just finished → re-check the playlist
-    // (picks up drop-ins live) and advance the idle loop.
-    if (!inFallback.current) {
-      refreshPlaylist()
-      advanceIdle()
+    if (inFallback.current) return
+    // A personalized clip just finished → tell the composer and let IT decide
+    // what plays next (next round, or release to idle). Do NOT auto-advance the
+    // idle shuffle: the composer owns this display until it says otherwise.
+    if (personalizedClipRef.current !== null) {
+      const clipId = personalizedClipRef.current
+      personalizedClipRef.current = null
+      wsRef.current?.send(JSON.stringify({
+        type: 'clip_ended', screen_id: screenIdRef.current, clip_id: clipId,
+      }))
+      return
     }
+    // An idle ad finished → re-check the playlist (picks up drop-ins live) and
+    // advance the idle loop.
+    refreshPlaylist()
+    advanceIdle()
   }
 
   useEffect(() => {
@@ -169,6 +183,7 @@ export default function App() {
     // WS URL so the composer can target individual displays later; the
     // composer ignores it today (broadcasts `play` to every client).
     const screenId = new URLSearchParams(window.location.search).get('screen_id')
+    screenIdRef.current = screenId  // used by handleEnded to tag clip_ended
     const wsUrl = screenId
       ? `${WS_URL}${WS_URL.includes('?') ? '&' : '?'}screen_id=${encodeURIComponent(screenId)}`
       : WS_URL
@@ -197,13 +212,20 @@ export default function App() {
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data) as {
-          type: string; video_url: string; person?: string; ad?: string
+          type: string; video_url: string; person?: string; ad?: string; clip_id?: string
         }
         console.log('[kiosk] WS message', msg)
         if (msg.type === 'play') {
           paused.current = false // generated clips always play; idle resumes un-paused afterward
+          // Mark this as a personalized clip so its end emits clip_ended (and
+          // does not auto-advance idle). clip_id falls back to the url.
+          personalizedClipRef.current = msg.clip_id ?? msg.video_url
           setDebugInfo({ person: msg.person, ad: msg.ad })
           playVideo(msg.video_url, false)
+        } else if (msg.type === 'idle') {
+          // Composer released this display → resume the idle shuffle.
+          personalizedClipRef.current = null
+          advanceIdle()
         }
       }
 
