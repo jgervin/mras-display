@@ -25,6 +25,7 @@ interface MockWSInstance {
   onclose: (() => void) | null
   onmessage: ((e: { data: string }) => void) | null
   close: ReturnType<typeof vi.fn>
+  send: ReturnType<typeof vi.fn>
   simulateOpen: () => void
   simulateClose: () => void
   simulateMessage: (data: object) => void
@@ -36,6 +37,7 @@ const MockWebSocket = vi.fn(() => {
   mockWS = {
     onopen: null, onclose: null, onmessage: null,
     close: vi.fn(),
+    send: vi.fn(),
     simulateOpen() { this.onopen?.() },
     simulateClose() { this.onclose?.() },
     simulateMessage(data) { this.onmessage?.({ data: JSON.stringify(data) }) },
@@ -276,6 +278,84 @@ describe('connection lifecycle', () => {
     const v = activeVideo(container)
     expect(v.src).toContain('/media/abc.mp4')
     expect(v.loop).toBe(false)
+  })
+})
+
+describe('temporal orchestration', () => {
+  it('emits clip_ended over the WS when a personalized clip ends, and does not auto-advance idle', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-1')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    // A personalized clip arrives and plays.
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/personal.mp4', clip_id: 'orch-u1-0' })
+      await vi.runAllTimersAsync()
+    })
+    expect(activeVideo(container).src).toContain('personal.mp4')
+
+    mockWS.send.mockClear()
+    const srcBefore = activeVideo(container).src
+
+    // The personalized clip ends.
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    // Composer is told; the kiosk does NOT advance the idle rotation itself.
+    expect(mockWS.send).toHaveBeenCalledTimes(1)
+    const sent = JSON.parse(mockWS.send.mock.calls[0][0])
+    expect(sent).toMatchObject({ type: 'clip_ended', screen_id: 'display-1', clip_id: 'orch-u1-0' })
+    expect(activeVideo(container).src).toBe(srcBefore) // unchanged — composer decides next
+  })
+
+  it('resumes the idle shuffle on an idle message', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }),
+    }))
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    // A personalized clip takes over the display.
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/personal.mp4', clip_id: 'c1' })
+      await vi.runAllTimersAsync()
+    })
+    expect(activeVideo(container).src).toContain('personal.mp4')
+
+    // Composer releases the display → idle resumes (an idle-pool video, not the clip).
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'idle' })
+      await vi.runAllTimersAsync()
+    })
+    expect(activeVideo(container).src).not.toContain('personal.mp4')
+    expect(activeVideo(container).src).toMatch(/\/(a|b)\.mp4/)
+  })
+
+  it('an idle clip ending still auto-advances the rotation (no clip_ended emitted)', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }),
+    }))
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    const srcBefore = activeVideo(container).src
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    // No personalized clip was playing → normal idle advance, nothing sent upstream.
+    expect(mockWS.send).not.toHaveBeenCalled()
+    expect(activeVideo(container).src).not.toBe(srcBefore)
   })
 })
 
