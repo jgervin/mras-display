@@ -34,8 +34,10 @@ export default function App() {
   const inFallback = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
   // Non-null while a personalized (composer-pushed) clip is the current video.
-  // Holds its clip id; cleared once we hand control back to the composer.
-  const personalizedClipRef = useRef<string | null>(null)
+  // Holds its clip id + the composer's trigger_id (echoed back on playback
+  // start/end so the composer can key God View playback/ad_run events), plus the
+  // local start time for duration_ms. Cleared once we hand control back to the composer.
+  const personalizedClipRef = useRef<{ clipId: string; triggerId: string; startedAt?: number } | null>(null)
   const screenIdRef = useRef<string | null>(null)
   // Idle-ad rotation: shuffled cycle over the composer /playlist pool (drop a
   // .mp4 into assets/ to add one). Starts as the single default video.
@@ -79,9 +81,37 @@ export default function App() {
     }, FADE_MS)
   }
 
+  // Playback echo → composer's _handle_display_echo (events journal). Both require
+  // a truthy trigger_id AND screen_id; a legacy play without a trigger_id is a
+  // no-op (never crash). The composer clock is authoritative — `ts` is informational.
+  const emitPlaybackStarted = (clip: { triggerId: string; startedAt?: number }) => {
+    if (!clip.triggerId) return
+    clip.startedAt = Date.now()
+    wsRef.current?.send(JSON.stringify({
+      type: 'playback_started',
+      trigger_id: clip.triggerId,
+      screen_id: screenIdRef.current,
+      ts: new Date().toISOString(),
+    }))
+  }
+
+  const emitPlaybackEnded = (clip: { triggerId: string; startedAt?: number }) => {
+    if (!clip.triggerId) return
+    const msg: Record<string, unknown> = {
+      type: 'playback_ended',
+      trigger_id: clip.triggerId,
+      screen_id: screenIdRef.current,
+      ts: new Date().toISOString(),
+    }
+    if (clip.startedAt != null) msg.duration_ms = Date.now() - clip.startedAt
+    wsRef.current?.send(JSON.stringify(msg))
+  }
+
   // Load `url` into the hidden element and crossfade to it. Loading the hidden
   // element (not the visible one) avoids interrupting the playing video.
-  const playVideo = (url: string, loop: boolean = false) => {
+  // `onPlaying` fires once playback actually starts (used to echo playback_started
+  // for a personalized clip; idle/fallback plays pass nothing).
+  const playVideo = (url: string, loop: boolean = false, onPlaying?: () => void) => {
     const a = videoARef.current
     const b = videoBRef.current
     if (!a || !b) return
@@ -95,7 +125,7 @@ export default function App() {
     back.src = url
     back.load()
     back.play()
-      .then(() => startFade(front, back))
+      .then(() => { startFade(front, back); onPlaying?.() })
       .catch((err) => { console.warn('[kiosk] video.play() rejected:', err); startFade(front, back) })
   }
 
@@ -155,10 +185,12 @@ export default function App() {
     // what plays next (next round, or release to idle). Do NOT auto-advance the
     // idle shuffle: the composer owns this display until it says otherwise.
     if (personalizedClipRef.current !== null) {
-      const clipId = personalizedClipRef.current
+      const clip = personalizedClipRef.current
       personalizedClipRef.current = null
+      // Echo playback_ended (God View journal) THEN clip_ended (orchestrator advance).
+      emitPlaybackEnded(clip)
       wsRef.current?.send(JSON.stringify({
-        type: 'clip_ended', screen_id: screenIdRef.current, clip_id: clipId,
+        type: 'clip_ended', screen_id: screenIdRef.current, clip_id: clip.clipId,
       }))
       return
     }
@@ -212,18 +244,24 @@ export default function App() {
 
       ws.onmessage = (event) => {
         const msg = JSON.parse(event.data) as {
-          type: string; video_url: string; person?: string; ad?: string; clip_id?: string
+          type: string; video_url: string; person?: string; ad?: string; clip_id?: string; trigger_id?: string
         }
         console.log('[kiosk] WS message', msg)
         if (msg.type === 'play') {
           paused.current = false // generated clips always play; idle resumes un-paused afterward
+          // A personalized clip already playing is being superseded → echo its end.
+          if (personalizedClipRef.current) emitPlaybackEnded(personalizedClipRef.current)
           // Mark this as a personalized clip so its end emits clip_ended (and
-          // does not auto-advance idle). clip_id falls back to the url.
-          personalizedClipRef.current = msg.clip_id ?? msg.video_url
+          // does not auto-advance idle). clip_id falls back to the url; trigger_id
+          // (echo key) falls back to '' for legacy plays → echo is skipped.
+          const clip = { clipId: msg.clip_id ?? msg.video_url, triggerId: msg.trigger_id ?? '' }
+          personalizedClipRef.current = clip
           setDebugInfo({ person: msg.person, ad: msg.ad })
-          playVideo(msg.video_url, false)
+          playVideo(msg.video_url, false, () => emitPlaybackStarted(clip))
         } else if (msg.type === 'idle') {
-          // Composer released this display → resume the idle shuffle.
+          // Composer released this display → echo the outgoing clip's end, then
+          // resume the idle shuffle.
+          if (personalizedClipRef.current) emitPlaybackEnded(personalizedClipRef.current)
           personalizedClipRef.current = null
           advanceIdle()
         }

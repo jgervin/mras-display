@@ -359,6 +359,166 @@ describe('temporal orchestration', () => {
   })
 })
 
+describe('playback echo (God View lifecycle)', () => {
+  // The composer's _handle_display_echo relays these into the events journal
+  // (playback/started|ended + ad_run/playing|completed). It requires the exact
+  // message type plus a truthy trigger_id AND screen_id, and reads optional
+  // duration_ms on ended. Timestamps are informational (composer uses its own clock).
+  const sentOfType = (type: string): Array<Record<string, unknown>> =>
+    mockWS.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === type)
+
+  it('emits playback_started with trigger_id + screen_id when a personalized clip starts', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+
+    const started = sentOfType('playback_started')
+    expect(started).toHaveLength(1)
+    expect(started[0]).toMatchObject({
+      type: 'playback_started', trigger_id: 'abc-123', screen_id: 'display-2',
+    })
+    expect(typeof started[0].ts).toBe('string')
+  })
+
+  it('emits playback_ended with trigger_id + screen_id when the personalized clip finishes', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({
+      type: 'playback_ended', trigger_id: 'abc-123', screen_id: 'display-2',
+    })
+    // The orchestrator-advancing clip_ended is still sent alongside the echo.
+    expect(sentOfType('clip_ended')).toHaveLength(1)
+  })
+
+  it('includes duration_ms on playback_ended when the start time is known', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => { vi.advanceTimersByTime(4000) })
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(typeof ended[0].duration_ms).toBe('number')
+    expect(ended[0].duration_ms as number).toBeGreaterThanOrEqual(4000)
+  })
+
+  it('emits playback_ended for the outgoing clip when superseded by an idle message', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }),
+    }))
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'idle' })
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({ trigger_id: 'abc-123', screen_id: 'display-2' })
+  })
+
+  it('ends the outgoing clip and starts the new one when superseded by another play', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/first.mp4', trigger_id: 't1' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/second.mp4', trigger_id: 't2' })
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({ trigger_id: 't1', screen_id: 'display-2' })
+
+    const started = sentOfType('playback_started')
+    expect(started).toHaveLength(1)
+    expect(started[0]).toMatchObject({ trigger_id: 't2', screen_id: 'display-2' })
+  })
+
+  it('never emits an echo for a legacy play with no trigger_id (does not crash)', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', clip_id: 'orch-u1-0' })
+      await vi.runAllTimersAsync()
+    })
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    expect(sentOfType('playback_started')).toHaveLength(0)
+    expect(sentOfType('playback_ended')).toHaveLength(0)
+    // clip_ended still flows so the orchestrator advances.
+    expect(sentOfType('clip_ended')).toHaveLength(1)
+  })
+})
+
 describe('click-to-pause', () => {
   it('clicking the screen pauses the visible video', async () => {
     vi.useFakeTimers()
