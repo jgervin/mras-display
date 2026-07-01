@@ -257,7 +257,7 @@ export default function App() {
           const clip = { clipId: msg.clip_id ?? msg.video_url, triggerId: msg.trigger_id ?? '' }
           personalizedClipRef.current = clip
           setDebugInfo({ person: msg.person, ad: msg.ad })
-          playVideo(msg.video_url, false, () => emitPlaybackStarted(clip))
+          playVideo(msg.video_url, false, () => { if (personalizedClipRef.current === clip) emitPlaybackStarted(clip) })
         } else if (msg.type === 'idle') {
           // Composer released this display → echo the outgoing clip's end, then
           // resume the idle shuffle.

@@ -517,6 +517,57 @@ describe('playback echo (God View lifecycle)', () => {
     // clip_ended still flows so the orchestrator advances.
     expect(sentOfType('clip_ended')).toHaveLength(1)
   })
+
+  it('does not emit playback_started for clip1 after supersede when its onPlaying resolves late (race guard)', async () => {
+    // Regression: rapid supersede race. clip1's back.play() is async; if clip2
+    // arrives before clip1's play() promise resolves, personalizedClipRef is
+    // already pointing at clip2 and emitPlaybackEnded(clip1) has already fired.
+    // clip1's late onPlaying must NOT emit playback_started — that would produce
+    // an out-of-order started/ended pair in the God View journal.
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    // Defer clip1's back.play() resolution to simulate slow media-decode.
+    // The initial idle play already consumed one call; this targets clip1's call.
+    const playSpy = HTMLMediaElement.prototype.play as unknown as ReturnType<typeof vi.fn>
+    let resolveClip1Play!: () => void
+    const clip1PlayPromise = new Promise<void>((resolve) => { resolveClip1Play = resolve })
+    playSpy.mockImplementationOnce(() => clip1PlayPromise)
+
+    // Clip1 arrives. Its play() is now pending — onPlaying hasn't fired yet.
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/clip1.mp4', trigger_id: 't1', clip_id: 'c1' })
+    })
+
+    // Clip2 supersedes clip1 before clip1's play() resolves:
+    //   emitPlaybackEnded(clip1) fires → personalizedClipRef ← clip2
+    //   clip2's play() resolves immediately → clip2's onPlaying fires → emitPlaybackStarted(clip2)
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/clip2.mp4', trigger_id: 't2', clip_id: 'c2' })
+      await vi.runAllTimersAsync()
+    })
+
+    // Now clip1's stale onPlaying fires (deferred play resolves).
+    // With the bug: emitPlaybackStarted(clip1) fires unconditionally → started after ended.
+    // With the fix: personalizedClipRef.current !== clip1 → guard blocks the emit.
+    await act(async () => {
+      resolveClip1Play()
+      await vi.runAllTimersAsync()
+    })
+
+    const allSent = mockWS.send.mock.calls.map((c) => JSON.parse(c[0] as string))
+    const startedT1 = allSent.filter((m) => m.type === 'playback_started' && m.trigger_id === 't1')
+    const endedT1   = allSent.filter((m) => m.type === 'playback_ended'  && m.trigger_id === 't1')
+    const startedT2 = allSent.filter((m) => m.type === 'playback_started' && m.trigger_id === 't2')
+
+    expect(startedT1).toHaveLength(0) // no late-fired started for the superseded clip
+    expect(endedT1).toHaveLength(1)   // clip1 got exactly one ended (from the supersede)
+    expect(startedT2).toHaveLength(1) // clip2 got its own started
+  })
 })
 
 describe('click-to-pause', () => {
