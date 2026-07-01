@@ -359,6 +359,217 @@ describe('temporal orchestration', () => {
   })
 })
 
+describe('playback echo (God View lifecycle)', () => {
+  // The composer's _handle_display_echo relays these into the events journal
+  // (playback/started|ended + ad_run/playing|completed). It requires the exact
+  // message type plus a truthy trigger_id AND screen_id, and reads optional
+  // duration_ms on ended. Timestamps are informational (composer uses its own clock).
+  const sentOfType = (type: string): Array<Record<string, unknown>> =>
+    mockWS.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === type)
+
+  it('emits playback_started with trigger_id + screen_id when a personalized clip starts', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+
+    const started = sentOfType('playback_started')
+    expect(started).toHaveLength(1)
+    expect(started[0]).toMatchObject({
+      type: 'playback_started', trigger_id: 'abc-123', screen_id: 'display-2',
+    })
+    expect(typeof started[0].ts).toBe('string')
+  })
+
+  it('emits playback_ended with trigger_id + screen_id when the personalized clip finishes', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({
+      type: 'playback_ended', trigger_id: 'abc-123', screen_id: 'display-2',
+    })
+    // The orchestrator-advancing clip_ended is still sent alongside the echo.
+    expect(sentOfType('clip_ended')).toHaveLength(1)
+  })
+
+  it('includes duration_ms on playback_ended when the start time is known', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => { vi.advanceTimersByTime(4000) })
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(typeof ended[0].duration_ms).toBe('number')
+    expect(ended[0].duration_ms as number).toBeGreaterThanOrEqual(4000)
+  })
+
+  it('emits playback_ended for the outgoing clip when superseded by an idle message', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({ videos: ['http://x/a.mp4', 'http://x/b.mp4'] }),
+    }))
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', trigger_id: 'abc-123' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'idle' })
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({ trigger_id: 'abc-123', screen_id: 'display-2' })
+  })
+
+  it('ends the outgoing clip and starts the new one when superseded by another play', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/first.mp4', trigger_id: 't1' })
+      await vi.runAllTimersAsync()
+    })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/second.mp4', trigger_id: 't2' })
+      await vi.runAllTimersAsync()
+    })
+
+    const ended = sentOfType('playback_ended')
+    expect(ended).toHaveLength(1)
+    expect(ended[0]).toMatchObject({ trigger_id: 't1', screen_id: 'display-2' })
+
+    const started = sentOfType('playback_started')
+    expect(started).toHaveLength(1)
+    expect(started[0]).toMatchObject({ trigger_id: 't2', screen_id: 'display-2' })
+  })
+
+  it('never emits an echo for a legacy play with no trigger_id (does not crash)', async () => {
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    const { container } = render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/p.mp4', clip_id: 'orch-u1-0' })
+      await vi.runAllTimersAsync()
+    })
+    await act(async () => {
+      activeVideo(container).dispatchEvent(new Event('ended'))
+      await vi.runAllTimersAsync()
+    })
+
+    expect(sentOfType('playback_started')).toHaveLength(0)
+    expect(sentOfType('playback_ended')).toHaveLength(0)
+    // clip_ended still flows so the orchestrator advances.
+    expect(sentOfType('clip_ended')).toHaveLength(1)
+  })
+
+  it('does not emit playback_started for clip1 after supersede when its onPlaying resolves late (race guard)', async () => {
+    // Regression: rapid supersede race. clip1's back.play() is async; if clip2
+    // arrives before clip1's play() promise resolves, personalizedClipRef is
+    // already pointing at clip2 and emitPlaybackEnded(clip1) has already fired.
+    // clip1's late onPlaying must NOT emit playback_started — that would produce
+    // an out-of-order started/ended pair in the God View journal.
+    vi.useFakeTimers()
+    window.history.pushState({}, '', '/?screen_id=display-2')
+    render(<App />)
+    await act(async () => { await vi.runAllTimersAsync() })
+    await act(async () => { mockWS.simulateOpen() })
+    mockWS.send.mockClear()
+
+    // Defer clip1's back.play() resolution to simulate slow media-decode.
+    // The initial idle play already consumed one call; this targets clip1's call.
+    const playSpy = HTMLMediaElement.prototype.play as unknown as ReturnType<typeof vi.fn>
+    let resolveClip1Play!: () => void
+    const clip1PlayPromise = new Promise<void>((resolve) => { resolveClip1Play = resolve })
+    playSpy.mockImplementationOnce(() => clip1PlayPromise)
+
+    // Clip1 arrives. Its play() is now pending — onPlaying hasn't fired yet.
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/clip1.mp4', trigger_id: 't1', clip_id: 'c1' })
+    })
+
+    // Clip2 supersedes clip1 before clip1's play() resolves:
+    //   emitPlaybackEnded(clip1) fires → personalizedClipRef ← clip2
+    //   clip2's play() resolves immediately → clip2's onPlaying fires → emitPlaybackStarted(clip2)
+    await act(async () => {
+      mockWS.simulateMessage({ type: 'play', video_url: 'http://x/clip2.mp4', trigger_id: 't2', clip_id: 'c2' })
+      await vi.runAllTimersAsync()
+    })
+
+    // Now clip1's stale onPlaying fires (deferred play resolves).
+    // With the bug: emitPlaybackStarted(clip1) fires unconditionally → started after ended.
+    // With the fix: personalizedClipRef.current !== clip1 → guard blocks the emit.
+    await act(async () => {
+      resolveClip1Play()
+      await vi.runAllTimersAsync()
+    })
+
+    const allSent = mockWS.send.mock.calls.map((c) => JSON.parse(c[0] as string))
+    const startedT1 = allSent.filter((m) => m.type === 'playback_started' && m.trigger_id === 't1')
+    const endedT1   = allSent.filter((m) => m.type === 'playback_ended'  && m.trigger_id === 't1')
+    const startedT2 = allSent.filter((m) => m.type === 'playback_started' && m.trigger_id === 't2')
+
+    expect(startedT1).toHaveLength(0) // no late-fired started for the superseded clip
+    expect(endedT1).toHaveLength(1)   // clip1 got exactly one ended (from the supersede)
+    expect(startedT2).toHaveLength(1) // clip2 got its own started
+  })
+})
+
 describe('click-to-pause', () => {
   it('clicking the screen pauses the visible video', async () => {
     vi.useFakeTimers()
